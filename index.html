@@ -660,7 +660,7 @@
 <div id="lobby">
   <div class="logo">ひらがじゃん</div>
   <div class="logo-sub">ひらがな牌版 麻雀</div>
-  <div style="font-size:0.7rem;color:rgba(255,255,255,0.35);margin-top:4px;letter-spacing:0.05em;">v1.2.0</div>
+  <div style="font-size:0.7rem;color:rgba(255,255,255,0.35);margin-top:4px;letter-spacing:0.05em;">v1.2.1</div>
   <div class="tile-deco">
     <span>あ</span><span>い</span><span>う</span><span>え</span><span>お</span>
   </div>
@@ -826,12 +826,9 @@ function initPeer(peerId) {
       iceServers: [
         { urls: 'stun:stun.l.google.com:19302' },
         { urls: 'stun:stun1.l.google.com:19302' },
-        { urls: 'stun:freestun.net:3478' },
-        { urls: 'stun:freestun.net:5350' },
-        { urls: 'turn:freestun.net:3478', username: 'free', credential: 'free' },
-        { urls: 'turns:freestun.net:5350', username: 'free', credential: 'free' },
-        { urls: 'turn:openrelay.metered.ca:80', username: 'openrelayproject', credential: 'openrelayproject' },
-        { urls: 'turn:openrelay.metered.ca:443?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' },
+        { urls: 'stun:stun2.l.google.com:19302' },
+        { urls: 'stun:stun3.l.google.com:19302' },
+        { urls: 'stun:stun4.l.google.com:19302' },
       ]
     }
   });
