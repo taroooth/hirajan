@@ -660,7 +660,7 @@
 <div id="lobby">
   <div class="logo">ひらがじゃん</div>
   <div class="logo-sub">ひらがな牌版 麻雀</div>
-  <div style="font-size:0.7rem;color:rgba(255,255,255,0.35);margin-top:4px;letter-spacing:0.05em;">v1.3.0</div>
+  <div style="font-size:0.7rem;color:rgba(255,255,255,0.35);margin-top:4px;letter-spacing:0.05em;">v1.4.0</div>
   <div class="tile-deco">
     <span>あ</span><span>い</span><span>う</span><span>え</span><span>お</span>
   </div>
@@ -723,18 +723,8 @@
         <button class="action-btn btn-kan" onclick="declareKan()" id="btnKan" disabled>カン</button>
       </div>
     </div>
-    <div class="words-display" id="wordsDisplay">
-      <span class="words-placeholder">単語を作ると表示されます</span>
-    </div>
-    <div class="build-word-area">
-      <div class="selected-for-word" id="selectedForWord">
-        <span style="font-size:0.75rem;color:rgba(255,255,255,0.3);">牌を選んで単語を作ろう</span>
-      </div>
-      <button class="build-btn" onclick="buildWord()" id="buildWordBtn" disabled>単語確定</button>
-      <button class="clear-btn" onclick="clearSelection()">✕</button>
-    </div>
     <div class="discard-section">
-      <span class="discard-hint">選んだ牌を捨てる↓</span>
+      <span class="discard-hint">牌を選んで捨てる／ドラッグで並び替え</span>
       <button class="discard-btn" onclick="discardSelected()" id="discardBtn" disabled>捨てる</button>
     </div>
     <div class="hand-tiles" id="handTiles"></div>
@@ -788,7 +778,10 @@ let myPeerId = '';
 let roomCode = '';
 let G = null;
 let myIndex = -1;
-let selectedTileIndices = [];
+let localHand = [];
+let prevServerHand = [];
+let selectedTileIdx = null;
+let dragSrcIdx = null;
 let joinRetryTimer = null;
 
 const MQTT_BROKER = 'wss://broker.hivemq.com:8884/mqtt';
@@ -939,8 +932,7 @@ function dealCards() {
   const perPlayer = 13;
   G.players.forEach((p, i) => {
     p.hand = deck.splice(0, perPlayer);
-    p.words = [];
-    if (G.round === 1) p.score = 0; // keep score across rounds
+    if (G.round === 1) p.score = 0;
   });
   G.yama = deck;
   G.currentTurn = 0;
@@ -1006,13 +998,6 @@ function handleAction(data) {
       G.currentTurn = (G.currentTurn + 1) % G.players.length;
       break;
     }
-    case 'setWords': {
-      if (G.currentTurn !== pIdx && !data.pon) return;
-      G.players[pIdx].words = data.words;
-      G.players[pIdx].hand = data.hand;
-      G.lastAction = {type:'setWords', player:pIdx};
-      break;
-    }
     case 'pon': {
       // steal last discard
       if (!G.lastDiscard) return;
@@ -1042,12 +1027,10 @@ function handleAction(data) {
     }
     case 'kan': {
       if (G.currentTurn !== pIdx) return;
-      // Draw 3 - word_length tiles
-      const wordLen = data.wordLen || 2;
-      const drawCount = Math.max(1, 3 - wordLen);
-      const drawn = G.yama.splice(0, Math.min(drawCount, G.yama.length));
-      G.players[pIdx].hand.push(...drawn);
-      G.lastAction = {type:'kan', player:pIdx, drawn:drawn.length};
+      if (G.yama.length === 0) return;
+      const kanTile = G.yama.pop();
+      G.players[pIdx].hand.push(kanTile);
+      G.lastAction = {type:'kan', player:pIdx, drawn:1};
       break;
     }
   }
@@ -1087,6 +1070,7 @@ function showGame() {
   document.getElementById('waiting').style.display = 'none';
   document.getElementById('lobby').style.display = 'none';
   document.getElementById('game').style.display = 'flex';
+  setupDrag();
   renderGame();
 }
 
@@ -1114,7 +1098,6 @@ function renderGame() {
     `<div class="opponent-panel">
       <div class="op-name">${p.name} (${p.hand.length}枚)</div>
       <div class="op-tiles">${p.hand.map(()=>'<div class="op-tile face-down"></div>').join('')}</div>
-      <div class="op-words">${p.words.map(w=>`<span class="op-word-chip">${w}</span>`).join('')}</div>
     </div>`).join('');
 
   // Yama
@@ -1131,22 +1114,8 @@ function renderGame() {
   // My name
   document.getElementById('myNameDisplay').textContent = me.name;
 
-  // My words
-  const wd = document.getElementById('wordsDisplay');
-  if (me.words.length > 0) {
-    wd.innerHTML = me.words.map((w,i) =>
-      `<div class="word-chip">${w} <span class="remove-word" onclick="removeWord(${i})">✕</span></div>`
-    ).join('');
-  } else {
-    wd.innerHTML = '<span class="words-placeholder">単語を作ると表示されます</span>';
-  }
-
-  // Check buttons
-  const canDraw = isMyTurn && G.drawnTile === null && G.yama.length > 0;
-  const canDiscard = isMyTurn && selectedTileIndices.length === 1;
-
-  // Build word
-  renderSelectedForWord();
+  // Sync local hand order
+  syncLocalHand();
 
   // Hand tiles
   renderHand();
@@ -1162,82 +1131,120 @@ function renderGame() {
     if (la.type==='draw') msg = `${pname}が牌を引いた`;
     if (la.type==='discard') msg = `${pname}が「${la.tile}」を捨てた`;
     if (la.type==='pon') msg = `${pname}がポン！「${la.tile}」`;
-    if (la.type==='kan') msg = `${pname}がカン！${la.drawn}枚引いた`;
-    if (la.type==='setWords') msg = `${pname}が単語を更新`;
+    if (la.type==='kan') msg = `${pname}がカン！`;
     if (msg) addLog(msg);
   }
 }
 
+function syncLocalHand() {
+  const serverHand = G.players[myIndex]?.hand || [];
+  const prev = [...prevServerHand];
+  const added = [];
+  serverHand.forEach(t => {
+    const i = prev.indexOf(t);
+    if (i >= 0) prev.splice(i, 1);
+    else added.push(t);
+  });
+  const curr = [...serverHand];
+  localHand = localHand.filter(t => {
+    const i = curr.indexOf(t);
+    if (i >= 0) { curr.splice(i, 1); return true; }
+    return false;
+  });
+  localHand.push(...added);
+  prevServerHand = [...serverHand];
+  if (selectedTileIdx !== null && selectedTileIdx >= localHand.length) selectedTileIdx = null;
+}
+
 function renderHand() {
-  const me = G.players[myIndex];
-  const isMyTurn = G.currentTurn === myIndex;
   const ht = document.getElementById('handTiles');
-  ht.innerHTML = me.hand.map((t,i) => {
-    const sel = selectedTileIndices.includes(i);
-    const isJust = G.lastAction?.type==='draw' && G.lastAction.player===myIndex && i===me.hand.length-1;
-    return `<div class="hand-tile ${sel?'selected':''} ${isJust?'just-drawn':''}" 
-      onclick="toggleTile(${i})">${t}</div>`;
+  const justDrew = G.lastAction?.type === 'draw' && G.lastAction.player === myIndex;
+  ht.innerHTML = localHand.map((t, i) => {
+    const sel = selectedTileIdx === i;
+    const isJust = justDrew && i === localHand.length - 1;
+    return `<div class="hand-tile ${sel?'selected':''} ${isJust?'just-drawn':''}"
+      draggable="true" data-idx="${i}" onclick="toggleTile(${i})">${t}</div>`;
   }).join('');
 }
 
-function renderSelectedForWord() {
-  const me = G.players[myIndex];
-  const sf = document.getElementById('selectedForWord');
-  if (selectedTileIndices.length === 0) {
-    sf.innerHTML = '<span style="font-size:0.75rem;color:rgba(255,255,255,0.3);">牌を選んで単語を作ろう</span>';
-  } else {
-    sf.innerHTML = selectedTileIndices.map(i =>
-      `<div class="selected-tile-preview">${me.hand[i]}</div>`).join('');
-  }
-  const buildBtn = document.getElementById('buildWordBtn');
-  buildBtn.disabled = selectedTileIndices.length < 2;
+function setupDrag() {
+  const ht = document.getElementById('handTiles');
+
+  ht.addEventListener('dragstart', e => {
+    const el = e.target.closest('[data-idx]');
+    if (!el) return;
+    dragSrcIdx = parseInt(el.dataset.idx);
+    setTimeout(() => { if (el) el.style.opacity = '0.3'; }, 0);
+  });
+  ht.addEventListener('dragend', () => { dragSrcIdx = null; renderHand(); });
+  ht.addEventListener('dragover', e => e.preventDefault());
+  ht.addEventListener('drop', e => {
+    e.preventDefault();
+    const el = e.target.closest('[data-idx]');
+    if (!el || dragSrcIdx === null) return;
+    const dest = parseInt(el.dataset.idx);
+    if (dest === dragSrcIdx) return;
+    const tile = localHand.splice(dragSrcIdx, 1)[0];
+    localHand.splice(dest, 0, tile);
+    if (selectedTileIdx !== null) {
+      if (selectedTileIdx === dragSrcIdx) selectedTileIdx = dest;
+      else if (dragSrcIdx < dest) { if (selectedTileIdx > dragSrcIdx && selectedTileIdx <= dest) selectedTileIdx--; }
+      else { if (selectedTileIdx >= dest && selectedTileIdx < dragSrcIdx) selectedTileIdx++; }
+    }
+    dragSrcIdx = null;
+    renderHand();
+    updateActionButtons();
+  });
+
+  // Touch drag support
+  let tIdx = null, tX = 0, tY = 0, tMoved = false;
+  ht.addEventListener('touchstart', e => {
+    const el = e.target.closest('[data-idx]');
+    if (!el) return;
+    tIdx = parseInt(el.dataset.idx);
+    tX = e.touches[0].clientX; tY = e.touches[0].clientY; tMoved = false;
+  }, {passive: true});
+  ht.addEventListener('touchmove', e => {
+    if (tIdx === null) return;
+    if (Math.abs(e.touches[0].clientX-tX)>8 || Math.abs(e.touches[0].clientY-tY)>8) tMoved = true;
+  }, {passive: true});
+  ht.addEventListener('touchend', e => {
+    if (tIdx === null) return;
+    if (tMoved) {
+      const t = e.changedTouches[0];
+      const dest_el = document.elementFromPoint(t.clientX, t.clientY)?.closest('[data-idx]');
+      if (dest_el) {
+        const dest = parseInt(dest_el.dataset.idx);
+        if (dest !== tIdx) {
+          const tile = localHand.splice(tIdx, 1)[0];
+          localHand.splice(dest, 0, tile);
+          if (selectedTileIdx !== null) {
+            if (selectedTileIdx === tIdx) selectedTileIdx = dest;
+            else if (tIdx < dest) { if (selectedTileIdx > tIdx && selectedTileIdx <= dest) selectedTileIdx--; }
+            else { if (selectedTileIdx >= dest && selectedTileIdx < tIdx) selectedTileIdx++; }
+          }
+          renderHand(); updateActionButtons();
+        }
+      }
+    }
+    tIdx = null; tMoved = false;
+  });
 }
 
 function updateActionButtons() {
   const isMyTurn = G.currentTurn === myIndex;
-  const me = G.players[myIndex];
-
-  // Tsumo: my turn, have 14 tiles, 5 words complete
-  const totalNeeded = me.words.reduce((s,w)=>s+w.length,0);
-  const handFilled = me.hand.length === 0 && (me.words.length === 5 || isChiitoitsu(me.words));
-  document.getElementById('btnTsumo').disabled = !(isMyTurn && handFilled);
-
-  // Pon: not my turn, last discard exists
+  document.getElementById('btnTsumo').disabled = !isMyTurn;
   const canPon = !isMyTurn && G.lastDiscard && G.lastDiscard.byPlayer !== myIndex;
   document.getElementById('btnPon').disabled = !canPon;
-
-  // Ron: not my turn, last discard makes me win
-  document.getElementById('btnRon').disabled = !canPon; // simplified: same condition, validated on declare
-
-  // Kan: my turn, have a formed word of 2+ chars
-  const hasWord = me.words.some(w => w.length >= 2);
-  document.getElementById('btnKan').disabled = !(isMyTurn && hasWord);
-
-  // Discard
-  document.getElementById('discardBtn').disabled = !(isMyTurn && selectedTileIndices.length === 1);
-}
-
-function isChiitoitsu(words) {
-  return words.length === 7 && words.every(w => w.length === 2);
+  document.getElementById('btnRon').disabled = !canPon;
+  document.getElementById('btnKan').disabled = !(isMyTurn && G.drawnTile !== null);
+  document.getElementById('discardBtn').disabled = !(isMyTurn && selectedTileIdx !== null);
 }
 
 // ===== INTERACTIONS =====
 function toggleTile(idx) {
-  const me = G.players[myIndex];
-  if (selectedTileIndices.includes(idx)) {
-    selectedTileIndices = selectedTileIndices.filter(i => i !== idx);
-  } else {
-    selectedTileIndices.push(idx);
-  }
+  selectedTileIdx = (selectedTileIdx === idx) ? null : idx;
   renderHand();
-  renderSelectedForWord();
-  updateActionButtons();
-}
-
-function clearSelection() {
-  selectedTileIndices = [];
-  renderHand();
-  renderSelectedForWord();
   updateActionButtons();
 }
 
@@ -1248,46 +1255,11 @@ function drawTile() {
 }
 
 function discardSelected() {
-  if (selectedTileIndices.length !== 1) return;
-  const me = G.players[myIndex];
-  const idx = selectedTileIndices[0];
-  const tile = me.hand[idx];
-  selectedTileIndices = [];
-  sendAction({action:'discard', tile, handIdx: idx});
-}
-
-function buildWord() {
-  if (selectedTileIndices.length < 2) return;
-  const me = G.players[myIndex];
-  const word = selectedTileIndices.map(i => me.hand[i]).join('');
-
-  // Check word length rules: must be 2 or 3
-  if (word.length !== 2 && word.length !== 3) {
-    showNotif('単語は2文字か3文字です');
-    return;
-  }
-
-  // Check word limit: 1×2文字 + 4×3文字 = 5組, or 七対子 7×2文字
-  const newWords = [...me.words, word];
-  const twoChar = newWords.filter(w=>w.length===2).length;
-  const threeChar = newWords.filter(w=>w.length===3).length;
-  if (twoChar > 7) { showNotif('2文字単語が多すぎます'); return; }
-  if (!isChiitoitsu(newWords) && twoChar > 1) { showNotif('2文字単語は1組まで（七対子以外）'); return; }
-  if (threeChar > 4) { showNotif('3文字単語は4組まで'); return; }
-
-  const newHand = me.hand.filter((_,i) => !selectedTileIndices.includes(i));
-  selectedTileIndices = [];
-
-  sendAction({action:'setWords', words: newWords, hand: newHand});
-  showNotif(`「${word}」を作った！`);
-}
-
-function removeWord(wordIdx) {
-  const me = G.players[myIndex];
-  const word = me.words[wordIdx];
-  const newWords = me.words.filter((_,i)=>i!==wordIdx);
-  const newHand = [...me.hand, ...word.split('')];
-  sendAction({action:'setWords', words: newWords, hand: newHand});
+  if (selectedTileIdx === null) return;
+  const tile = localHand[selectedTileIdx];
+  const handIdx = G.players[myIndex].hand.indexOf(tile);
+  selectedTileIdx = null;
+  sendAction({action:'discard', tile, handIdx});
 }
 
 function tryPon(tile) {
@@ -1312,9 +1284,7 @@ function declareRon() {
 }
 
 function declareKan() {
-  const me = G.players[myIndex];
-  const longestWord = me.words.reduce((a,b) => b.length > a.length ? b : a, '');
-  sendAction({action:'kan', wordLen: longestWord.length});
+  sendAction({action:'kan'});
   showNotif('カン！');
 }
 
