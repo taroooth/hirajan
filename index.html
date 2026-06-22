@@ -441,8 +441,11 @@
   .action-btn:disabled { opacity: 0.35; cursor: not-allowed; }
   .btn-tsumo { background: var(--gold); color: var(--dark); }
   .btn-pon { background: #e67e22; color: white; }
+  .btn-chi { background: #16a085; color: white; }
   .btn-ron { background: var(--red); color: white; }
   .btn-kan { background: #8e44ad; color: white; }
+
+  .yama-tile.drawable { box-shadow: 3px 3px 0 rgba(0,0,0,0.3), 6px 6px 0 rgba(0,0,0,0.15), 0 0 16px rgba(201,168,76,0.7); }
 
   /* Words display */
   .words-display {
@@ -660,7 +663,7 @@
 <div id="lobby">
   <div class="logo">ひらがじゃん</div>
   <div class="logo-sub">ひらがな牌版 麻雀</div>
-  <div style="font-size:0.7rem;color:rgba(255,255,255,0.35);margin-top:4px;letter-spacing:0.05em;">v1.4.0</div>
+  <div style="font-size:0.7rem;color:rgba(255,255,255,0.35);margin-top:4px;letter-spacing:0.05em;">v1.5.0</div>
   <div class="tile-deco">
     <span>あ</span><span>い</span><span>う</span><span>え</span><span>お</span>
   </div>
@@ -719,6 +722,7 @@
       <div class="action-btns">
         <button class="action-btn btn-tsumo" onclick="declareTsumo()" id="btnTsumo" disabled>ツモ</button>
         <button class="action-btn btn-pon" onclick="declarePon()" id="btnPon" disabled>ポン</button>
+        <button class="action-btn btn-chi" onclick="declareChi()" id="btnChi" disabled>チー</button>
         <button class="action-btn btn-ron" onclick="declareRon()" id="btnRon" disabled>ロン</button>
         <button class="action-btn btn-kan" onclick="declareKan()" id="btnKan" disabled>カン</button>
       </div>
@@ -813,9 +817,10 @@ function createRoom() {
 
   connectMQTT(() => {
     G = {
-      players: [{id: myPeerId, name: myName, hand:[], words:[], score:0}],
+      players: [{id: myPeerId, name: myName, hand:[], score:0}],
       yama: [], discards: [],
-      currentTurn: 0, phase: 'waiting', drawnTile: null, round: 1,
+      currentTurn: 0, turnPhase: 'draw',
+      phase: 'waiting', drawnTile: null, round: 1,
     };
 
     mqttClient.publish(topic('state'), '', {retain: true});
@@ -829,7 +834,7 @@ function createRoom() {
       if (t === topic('join')) {
         if (G.phase !== 'waiting' || G.players.length >= 4) return;
         if (G.players.find(p => p.id === data.id)) return;
-        G.players.push({id: data.id, name: data.name, hand:[], words:[], score:0});
+        G.players.push({id: data.id, name: data.name, hand:[], score:0});
         broadcastState();
         updateWaitingUI();
       } else if (t === topic('action')) {
@@ -929,6 +934,8 @@ function dealCards() {
   const deck = shuffle(makeDeck());
   G.discards = [];
   G.drawnTile = null;
+  G.lastDiscard = null;
+  G.turnPhase = 'draw';
   const perPlayer = 13;
   G.players.forEach((p, i) => {
     p.hand = deck.splice(0, perPlayer);
@@ -971,66 +978,79 @@ function handleAction(data) {
   switch(data.action) {
     case 'draw': {
       if (G.currentTurn !== pIdx) return;
-      if (G.drawnTile !== null) return;
+      if (G.turnPhase !== 'draw') return;
       if (G.yama.length === 0) { endRound(null, 'yama'); return; }
       G.drawnTile = G.yama.pop();
       G.players[pIdx].hand.push(G.drawnTile);
+      G.lastDiscard = null;   // claim window closes
+      G.turnPhase = 'discard';
       G.lastAction = {type:'draw', player:pIdx};
       break;
     }
     case 'discard': {
       if (G.currentTurn !== pIdx) return;
+      if (G.turnPhase !== 'discard') return;
       const tile = data.tile;
       const hi = G.players[pIdx].hand.indexOf(tile);
-      // find specific instance if needed
-      let idx = -1;
-      if (data.handIdx !== undefined) {
-        idx = data.handIdx;
-        if (G.players[pIdx].hand[idx] !== tile) idx = hi;
-      } else { idx = hi; }
+      let idx = (data.handIdx !== undefined && G.players[pIdx].hand[data.handIdx] === tile)
+        ? data.handIdx : hi;
       if (idx < 0) return;
       G.players[pIdx].hand.splice(idx, 1);
       G.discards.push(tile);
       G.drawnTile = null;
       G.lastDiscard = {tile, byPlayer: pIdx};
       G.lastAction = {type:'discard', player:pIdx, tile};
-      // next turn
       G.currentTurn = (G.currentTurn + 1) % G.players.length;
+      G.turnPhase = 'draw';
       break;
     }
     case 'pon': {
-      // steal last discard
-      if (!G.lastDiscard) return;
-      const {tile, byPlayer} = G.lastDiscard;
-      if (byPlayer === pIdx) return;
-      // Check if player has this tile
-      const hi2 = G.players[pIdx].hand.indexOf(tile);
-      if (hi2 < 0) return; // need at least 1 copy in hand + the discard = potential word
-      G.discards.pop(); // remove from discard pile
-      G.players[pIdx].hand.push(tile); // add to hand
-      // set current turn to pon player, skip draw
+      if (!G.lastDiscard || G.turnPhase !== 'draw') return;
+      const {tile: ponTile, byPlayer: ponBy} = G.lastDiscard;
+      if (ponBy === pIdx) return;
+      if (!G.players[pIdx].hand.includes(ponTile)) return;
+      G.discards.pop();
+      G.players[pIdx].hand.push(ponTile);
       G.currentTurn = pIdx;
-      G.drawnTile = tile; // treat as already drawn (must discard after pon)
+      G.turnPhase = 'discard';
+      G.drawnTile = ponTile;
       G.lastDiscard = null;
-      G.lastAction = {type:'pon', player:pIdx, tile};
+      G.lastAction = {type:'pon', player:pIdx, tile:ponTile};
+      break;
+    }
+    case 'chi': {
+      // Only the player whose turn it is to draw can chi
+      if (G.currentTurn !== pIdx) return;
+      if (!G.lastDiscard || G.turnPhase !== 'draw') return;
+      if (G.lastDiscard.byPlayer === pIdx) return;
+      const chiTile = G.lastDiscard.tile;
+      G.discards.pop();
+      G.players[pIdx].hand.push(chiTile);
+      G.turnPhase = 'discard';
+      G.drawnTile = chiTile;
+      G.lastDiscard = null;
+      G.lastAction = {type:'chi', player:pIdx, tile:chiTile};
       break;
     }
     case 'tsumo': {
-      if (G.currentTurn !== pIdx) return;
+      if (G.currentTurn !== pIdx || G.turnPhase !== 'discard') return;
       endRound(pIdx, 'tsumo');
       return;
     }
     case 'ron': {
-      if (!G.lastDiscard) return;
+      if (!G.lastDiscard || G.turnPhase !== 'draw') return;
+      if (G.lastDiscard.byPlayer === pIdx) return;
       endRound(pIdx, 'ron');
       return;
     }
     case 'kan': {
-      if (G.currentTurn !== pIdx) return;
+      if (G.currentTurn !== pIdx || G.turnPhase !== 'discard') return;
       if (G.yama.length === 0) return;
       const kanTile = G.yama.pop();
       G.players[pIdx].hand.push(kanTile);
-      G.lastAction = {type:'kan', player:pIdx, drawn:1};
+      G.drawnTile = kanTile;
+      // turnPhase stays 'discard' — must discard after kan
+      G.lastAction = {type:'kan', player:pIdx};
       break;
     }
   }
@@ -1081,7 +1101,10 @@ function renderGame() {
   // Turn indicator
   const isMyTurn = G.currentTurn === myIndex;
   const ind = document.getElementById('turnIndicator');
-  ind.textContent = isMyTurn ? '🎯 あなたのターン' : `${G.players[G.currentTurn]?.name || '?'}のターン`;
+  const phaseLabel = G.turnPhase === 'draw' ? '（引く）' : '（捨てる）';
+  ind.textContent = isMyTurn
+    ? `🎯 あなたのターン${phaseLabel}`
+    : `${G.players[G.currentTurn]?.name || '?'}のターン${phaseLabel}`;
   ind.className = 'turn-indicator ' + (isMyTurn ? 'turn-mine' : 'turn-other');
 
   // Scores bar
@@ -1102,8 +1125,10 @@ function renderGame() {
 
   // Yama
   document.getElementById('yamaCount').textContent = `${G.yama.length}枚`;
+  const canDraw = isMyTurn && G.turnPhase === 'draw' && G.yama.length > 0;
   const yamaPile = document.getElementById('yamaPile');
-  yamaPile.style.cursor = (isMyTurn && G.drawnTile === null && G.yama.length > 0) ? 'pointer' : 'default';
+  yamaPile.style.cursor = canDraw ? 'pointer' : 'not-allowed';
+  yamaPile.querySelector('.yama-tile').classList.toggle('drawable', canDraw);
 
   // Discard
   const dt = document.getElementById('discardTiles');
@@ -1128,10 +1153,11 @@ function renderGame() {
     const la = G.lastAction;
     const pname = G.players[la.player]?.name || '?';
     let msg = '';
-    if (la.type==='draw') msg = `${pname}が牌を引いた`;
-    if (la.type==='discard') msg = `${pname}が「${la.tile}」を捨てた`;
+    if (la.type==='draw') msg = `${pname}がツモ（自摸）`;
+    if (la.type==='discard') msg = `${pname}が「${la.tile}」を打牌`;
     if (la.type==='pon') msg = `${pname}がポン！「${la.tile}」`;
-    if (la.type==='kan') msg = `${pname}がカン！`;
+    if (la.type==='chi') msg = `${pname}がチー！「${la.tile}」`;
+    if (la.type==='kan') msg = `${pname}がカン！嶺上牌を引く`;
     if (msg) addLog(msg);
   }
 }
@@ -1233,12 +1259,27 @@ function setupDrag() {
 
 function updateActionButtons() {
   const isMyTurn = G.currentTurn === myIndex;
-  document.getElementById('btnTsumo').disabled = !isMyTurn;
-  const canPon = !isMyTurn && G.lastDiscard && G.lastDiscard.byPlayer !== myIndex;
-  document.getElementById('btnPon').disabled = !canPon;
-  document.getElementById('btnRon').disabled = !canPon;
-  document.getElementById('btnKan').disabled = !(isMyTurn && G.drawnTile !== null);
-  document.getElementById('discardBtn').disabled = !(isMyTurn && selectedTileIdx !== null);
+  const inDraw    = G.turnPhase === 'draw';
+  const inDiscard = G.turnPhase === 'discard';
+  const hasClaimable = G.lastDiscard && G.lastDiscard.byPlayer !== myIndex;
+
+  // ツモ: 自分のターン、捨て牌フェーズ（引いた後）
+  document.getElementById('btnTsumo').disabled = !(isMyTurn && inDiscard);
+
+  // ポン: 自分以外のターンで捨て牌あり（引く前）
+  document.getElementById('btnPon').disabled = !(!isMyTurn && inDraw && hasClaimable);
+
+  // チー: 自分のターンで前のプレイヤーの捨て牌あり（引く前）
+  document.getElementById('btnChi').disabled = !(isMyTurn && inDraw && hasClaimable);
+
+  // ロン: 自分以外のターンで捨て牌あり（引く前）
+  document.getElementById('btnRon').disabled = !(!isMyTurn && inDraw && hasClaimable);
+
+  // カン: 自分のターン、捨て牌フェーズ
+  document.getElementById('btnKan').disabled = !(isMyTurn && inDiscard);
+
+  // 捨てる: 自分のターン、捨て牌フェーズ、牌を選択中
+  document.getElementById('discardBtn').disabled = !(isMyTurn && inDiscard && selectedTileIdx !== null);
 }
 
 // ===== INTERACTIONS =====
@@ -1272,6 +1313,12 @@ function declarePon() {
   if (G.currentTurn === myIndex) return;
   sendAction({action:'pon'});
   showNotif('ポン！');
+}
+
+function declareChi() {
+  if (G.currentTurn !== myIndex) return;
+  sendAction({action:'chi'});
+  showNotif('チー！');
 }
 
 function declareTsumo() {
